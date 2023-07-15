@@ -1,28 +1,31 @@
 Transform: AWS::Serverless-2016-10-31
 AWSTemplateFormatVersion: "2010-09-09"
-Description: CICD
+Description: CICD-Elastc-Beanstalk
 
 Parameters:
-  DockerHubPassword:
+  EBEnvironmentName:
     Type: String
-  DockerHubUsername:
+    Default: ''
+  EBApplicationName:
     Type: String
+    Default: ''
 
 Resources:
 ##############################################
-############## Code Pipeline #################
+################## Pipeline ##################
 ##############################################
   Pipeline:
     Type: AWS::CodePipeline::Pipeline
     Properties:
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
       ArtifactStore:
-        Location: !Ref Bucket
         Type: S3
-      Name: !Sub ${AWS::StackName}-codepipeline
-      RoleArn: !GetAtt CodePipelineRole.Arn
+        Location: !Ref Bucket
       Stages:
-        - Actions:
-            - ActionTypeId:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
                 Category: Source
                 Owner: AWS
                 Provider: CodeCommit
@@ -32,44 +35,122 @@ Resources:
                 OutputArtifactFormat: CODE_ZIP
                 PollForSourceChanges: false
                 RepositoryName: !GetAtt CodeCommitRepository.Name
-              Name: Source
               OutputArtifacts:
-                - Name: SourceArtifact
-              Region: !Ref AWS::Region
+                - Name: AppArtifact
               RunOrder: 1
-          Name: Source
-        - Actions:
-            - ActionTypeId:
-                Category: Test
-                Owner: AWS
-                Provider: CodeBuild
-                Version: 1
-              Configuration:
-                ProjectName: !Ref CodeBuildProject1
-              InputArtifacts:
-                - Name: SourceArtifact
-              Name: Test
-              OutputArtifacts: []
               Region: !Ref AWS::Region
-              RunOrder: 1
-          Name: Test
-        - Actions:
-            - ActionTypeId:
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
                 Category: Build
                 Owner: AWS
                 Provider: CodeBuild
-                Version: 1
+                Version: '1'
               Configuration:
                 ProjectName: !Ref CodeBuildProject2
               InputArtifacts:
                 - Name: SourceArtifact
               #  InputArtifacts property, specify the scripts, etc. to be tested. In this case, specify the artifacts of the Source stage
-              Name: Build
               OutputArtifacts:
                 - Name: BuildArtifact
               Region: !Ref AWS::Region
               RunOrder: 1
-          Name: Build
+        - Name: Test
+          Actions:
+            - Name: Test
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject1
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts: [ ]
+              Region: !Ref AWS::Region
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: ElasticBeanstalk
+              Configuration:
+                ApplicationName: !Ref EBApplicationName
+                EnvironmentName: !Ref EBEnvironmentName
+                InputArtifacts:
+                  - Name: BuildOutput
+                OutputArtifacts: [ ]
+                Region: !Ref AWS::Region
+                RunOrder: 1
+##############################################
+######### CodePipeline Service Role ##########
+##############################################
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource:
+                  - !Sub arn:aws:s3:::${ArtifactBucket}/*
+                  - !Sub arn:aws:s3:::${ArtifactBucket}
+                Effect: Allow
+                Action:
+                  - s3:*
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - iam:PassRole
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+              - Resource: "*"
+                Effect: Allow
+                Action: '*'
+##############################################
+######### CodeDeploy Service Role ############
+##############################################
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodeDeployServiceRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodeDeployServiceRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  Principal: '*'
+                Resource: '*'
 ##############################################
 ############ Code Pipeline Role ##############
 ##############################################
@@ -259,13 +340,6 @@ Resources:
         Type: NO_CACHE
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
-        EnvironmentVariables:
-          - Name: DOCKERHUB_PASSWORD
-            Type: PARAMETER_STORE
-            Value: !Ref SSMParameterDockerHubPassword
-          - Name: DOCKERHUB_USERNAME
-            Type: PARAMETER_STORE
-            Value: !Ref SSMParameterDockerHubUsername
         Image: aws/codebuild/amazonlinux2-aarch64-standard:2.0
         ImagePullCredentialsType: CODEBUILD
         Type: ARM_CONTAINER
@@ -381,134 +455,14 @@ Resources:
       BucketName: !Sub ${AWS::StackName}-bucket
       AccessControl: Private
 ##############################################
-########## S3 Lambda Function Role ###########
-##############################################
-  S3FunctionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Action: sts:AssumeRole
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub ${AWS::StackName}-s3deleteobjectspolicy
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:DeleteObject
-                  - s3:ListBucket
-                Resource:
-                  - !GetAtt Bucket.Arn
-                  - !Sub
-                    - ${BucketArn}/*
-                    - BucketArn: !GetAtt Bucket.Arn
-##############################################
-############## S3 Lambda Function ############
-##############################################
-  S3Function:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub ${AWS::StackName}-s3function
-      CodeUri: app/
-      Handler: s3function.lambda_handler
-      Runtime: python3.9
-      MemorySize: 128
-      Role: !GetAtt S3FunctionRole.Arn
-      Environment:
-        Variables:
-          BUCKET_NAME: !Ref Bucket
-##############################################
-############## ECR Function Role #############
-##############################################
-  ECRFunctionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Action: sts:AssumeRole
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub ${AWS::StackName}-ecrdeleteimagespolicy
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - ecr:BatchDeleteImage
-                  - ecr:ListImages
-                Resource:
-                  - !GetAtt ECRRepository.Arn
-##############################################
-############### Custom Resource ##############
-##############################################
-  S3LambdaCustomResource:
-    Type: Custom::CustomResource
-    Properties:
-      ServiceToken: !GetAtt S3Function.Arn
-# # Custom resource will automatically delete objects in S3 buckets when deleting CloudFormation stacks.
-##############################################
-############### Custom Resource ##############
-##############################################
-  ECRLambdaCustomResource:
-    Type: Custom::CustomResource
-    Properties:
-      ServiceToken: !GetAtt ECRFunction.Arn
-# Custom resource will automatically delete images in ECR repositories when deleting CloudFormation stacks.
-##############################################
-############## ECR Lambda Function ###########
-##############################################
-  ECRFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub ${AWS::StackName}-ecrfunction
-      CodeUri: app/
-      Handler: ecrfunction.lambda_handler
-      Runtime: python3.9
-      MemorySize: 128
-      Role: !GetAtt ECRFunctionRole.Arn
-      Environment:
-        Variables:
-          ACCOUNT_ID: !Ref AWS::AccountId
-          ECR_REPOSITORY_NAME: !Ref ECRRepository
-##############################################
-########### SSM DockerHub Password ###########
-##############################################
-  SSMParameterDockerHubPassword:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub ${AWS::StackName}-dockerhubpassword
-      Type: String
-      Value: !Ref DockerHubPassword
-##############################################
-########### SSM DockerHub username ###########
-##############################################
-  SSMParameterDockerHubUsername:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub ${AWS::StackName}-dockerhubusername
-      Type: String
-      Value: !Ref DockerHubUsername
-##############################################
 ################ ECR Repository ##############
 ##############################################
   ECRRepository:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Sub ${AWS::StackName}-ecrrepository
-##############################################
 ################### Out Put ##################
 ##############################################
+Outputs:
+  PipelineUrl:
+    Value: !Sub https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}
