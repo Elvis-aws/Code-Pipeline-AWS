@@ -1,0 +1,514 @@
+Transform: AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CICD
+
+Parameters:
+  DockerHubPassword:
+    Type: String
+  DockerHubUsername:
+    Type: String
+
+Resources:
+##############################################
+############## Code Pipeline #################
+##############################################
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref Bucket
+        Type: S3
+      Name: !Sub ${AWS::StackName}-codepipeline
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                BranchName: master
+                OutputArtifactFormat: CODE_ZIP
+                PollForSourceChanges: false
+                RepositoryName: !GetAtt CodeCommitRepository.Name
+              Name: Source
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Region: !Ref AWS::Region
+              RunOrder: 1
+          Name: Source
+        - Actions:
+            - ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuildProject1
+              InputArtifacts:
+                - Name: SourceArtifact
+              Name: Test
+              OutputArtifacts: []
+              Region: !Ref AWS::Region
+              RunOrder: 1
+          Name: Test
+        - Actions:
+            - ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref CodeBuildProject2
+              InputArtifacts:
+                - Name: SourceArtifact
+              #  InputArtifacts property, specify the scripts, etc. to be tested. In this case, specify the artifacts of the Source stage
+              Name: Build
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Region: !Ref AWS::Region
+              RunOrder: 1
+          Name: Build
+##############################################
+############ Code Pipeline Role ##############
+##############################################
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: PipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codecommit:CancelUploadArchive
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Resource:
+                  - !GetAtt CodeCommitRepository.Arn
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:StartBuildBatch
+                Resource:
+                  - !GetAtt CodeBuildProject1.Arn
+                  - !GetAtt CodeBuildProject2.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub arn:aws:s3:::${Bucket}
+                  - !Sub arn:aws:s3:::${Bucket}/*
+##############################################
+########### CodeCommit Repository ############
+##############################################
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}-codecommitrepository
+# CodeCommit is responsible for the source stage of CodePipeline. It is used as a Git repository
+##############################################
+################# Event Rule #################
+##############################################
+  EventsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - CodeCommit Repository State Change
+        resources:
+          - !GetAtt CodeCommitRepository.Arn
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - master
+      Name: !Sub ${AWS::StackName}-event-rule
+      Targets:
+        - Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}
+          Id: !Sub ${AWS::StackName}-CodePipeline-CodeCommit
+          RoleArn: !GetAtt EventsRuleRole.Arn
+# EventBridge rule will be the trigger for CodePipeline on a push to CodeCommit.
+##############################################
+############### Events Rule Role #############
+##############################################
+  EventsRuleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: PipelineExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource:
+                  - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}
+##############################################
+########### CodeBuild Report Group ###########
+##############################################
+  CodeBuildReportGroup:
+    Type: AWS::CodeBuild::ReportGroup
+    Properties:
+      DeleteReports: true
+      ExportConfig:
+        ExportConfigType: NO_EXPORT
+      Name: !Sub ${AWS::StackName}-reportname
+      Type: TEST
+# If “CODE_COVERAGE” is specified, a report on code coverage rate will be created. When “TEST” is specified, a normal test report is created.
+# ExportConfig is a parameter related to exporting report groups. t allows exporting the raw report data to an S3 bucket.
+##############################################
+########### Code Build Project 1 #############
+##############################################
+  CodeBuildProject1:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: REPORT_NAME
+            Type: PLAINTEXT
+            Value: pytest_reports
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:2.0
+        ImagePullCredentialsType: CODEBUILD
+        Type: ARM_CONTAINER
+        PrivilegedMode: true
+        # Enables running the Docker daemon inside a Docker container. Set to true only if the build project is used to
+        # build Docker images. Otherwise, a build that attempts to interact with the Docker daemon fails.
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref LogGroup
+          Status: ENABLED
+          #StreamName:
+        S3Logs:
+          Status: DISABLED
+      Name: !Sub ${AWS::StackName}-project-01
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          
+          phases:
+            install:
+              runtime-versions:
+                python: 3.7
+              commands:
+                - pip3 install pytest
+                - pip3 install bottle
+            build:
+              commands:
+                - python -m pytest --junitxml=reports/pytest_reports.xml
+          reports:
+            $REPORT_NAME:
+              files:
+                - pytest_reports.xml
+              base-directory: reports
+              file-format: JUNITXML
+      Visibility: PRIVATE
+# CodeBuild is in charge of the test stage of CodePipeline.
+# This time, the test target will be a Python script, and the tool used for testing will be pytest.
+##############################################
+########### Code Build Project 2 #############
+##############################################
+  CodeBuildProject2:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Cache:
+        Type: NO_CACHE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          - Name: DOCKERHUB_PASSWORD
+            Type: PARAMETER_STORE
+            Value: !Ref SSMParameterDockerHubPassword
+          - Name: DOCKERHUB_USERNAME
+            Type: PARAMETER_STORE
+            Value: !Ref SSMParameterDockerHubUsername
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:2.0
+        ImagePullCredentialsType: CODEBUILD
+        Type: ARM_CONTAINER
+        PrivilegedMode: true
+      LogsConfig:
+        CloudWatchLogs:
+          Status: DISABLED
+        S3Logs:
+          Status: DISABLED
+      Name: !Sub ${AWS::StackName}-project-02
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo Logging in to Amazon ECR...
+                - aws --version
+                - aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+                - REPOSITORY_URI=${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepository}
+                - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+                - IMAGE_TAG=${!COMMIT_HASH:=latest}
+                - echo Logging in to Docker Hub...
+                - echo $DOCKERHUB_PASSWORD | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            build:
+              commands:
+                - echo Build started on `date`
+                - echo Building the Docker image...
+                - docker build -t $REPOSITORY_URI:latest .
+                - docker tag $REPOSITORY_URI:latest $REPOSITORY_URI:$IMAGE_TAG
+            post_build:
+              commands:
+                - echo Build completed on `date`
+                - echo Pushing the Docker images...
+                - docker push $REPOSITORY_URI:latest
+                - docker push $REPOSITORY_URI:$IMAGE_TAG
+                - echo Writing image definitions file...
+      Visibility: PRIVATE
+# This CodeBuild is in charge of the build stage of CodePipeline. It builds a Docker image from the code pushed to CodeCommit.
+# Push the built image to ECR.
+##############################################
+############# Code Build Role ################
+##############################################
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-pipelineexecutionpolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMParameterDockerHubPassword}
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMParameterDockerHubUsername}
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub arn:aws:s3:::${Bucket}
+                  - !Sub arn:aws:s3:::${Bucket}/*
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt LogGroup.Arn
+                  - !Sub
+                    - ${LogGroupArn}:log-stream:*
+                    - LogGroupArn: !GetAtt LogGroup.Arn
+##############################################
+################# Log Group ##################
+##############################################
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub ${AWS::StackName}-log-group
+##############################################
+################# S3 Bucket ##################
+##############################################
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-bucket
+      AccessControl: Private
+##############################################
+########## S3 Lambda Function Role ###########
+##############################################
+  S3FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-s3deleteobjectspolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt Bucket.Arn
+                  - !Sub
+                    - ${BucketArn}/*
+                    - BucketArn: !GetAtt Bucket.Arn
+##############################################
+############## S3 Lambda Function ############
+##############################################
+  S3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-s3function
+      CodeUri: app/
+      Handler: s3function.lambda_handler
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt S3FunctionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref Bucket
+##############################################
+############## ECR Function Role #############
+##############################################
+  ECRFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-ecrdeleteimagespolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:BatchDeleteImage
+                  - ecr:ListImages
+                Resource:
+                  - !GetAtt ECRRepository.Arn
+##############################################
+############### Custom Resource ##############
+##############################################
+  S3LambdaCustomResource:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt S3Function.Arn
+# # Custom resource will automatically delete objects in S3 buckets when deleting CloudFormation stacks.
+##############################################
+############### Custom Resource ##############
+##############################################
+  ECRLambdaCustomResource:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ECRFunction.Arn
+# Custom resource will automatically delete images in ECR repositories when deleting CloudFormation stacks.
+##############################################
+############## ECR Lambda Function ###########
+##############################################
+  ECRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-ecrfunction
+      CodeUri: app/
+      Handler: ecrfunction.lambda_handler
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt ECRFunctionRole.Arn
+      Environment:
+        Variables:
+          ACCOUNT_ID: !Ref AWS::AccountId
+          ECR_REPOSITORY_NAME: !Ref ECRRepository
+##############################################
+########### SSM DockerHub Password ###########
+##############################################
+  SSMParameterDockerHubPassword:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub ${AWS::StackName}-dockerhubpassword
+      Type: String
+      Value: !Ref DockerHubPassword
+##############################################
+########### SSM DockerHub username ###########
+##############################################
+  SSMParameterDockerHubUsername:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub ${AWS::StackName}-dockerhubusername
+      Type: String
+      Value: !Ref DockerHubUsername
+##############################################
+################ ECR Repository ##############
+##############################################
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}-ecrrepository
+##############################################
+################### Out Put ##################
+##############################################

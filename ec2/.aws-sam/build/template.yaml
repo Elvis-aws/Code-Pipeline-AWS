@@ -1,0 +1,410 @@
+Transform: AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CICD
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+  InstanceRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: InstanceRole
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Action:
+          - autoscaling:Describe*
+          - cloudformation:Describe*
+          - cloudformation:GetTemplate
+          - s3:Get*
+          Resource: '*'
+      Roles:
+      - Ref: InstanceRole
+  InstanceRoleInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+      - Ref: InstanceRole
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: basic Security group
+      GroupDescription: Allows SSH and HTTP inbound traffic
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: '0.0.0.0/0'
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: '0.0.0.0/0'
+  WebAppInstance:
+    DependsOn: InstanceRoleInstanceProfile
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-06464c878dbe46da4
+      InstanceType: t2.micro
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs: ''
+      SecurityGroupIds:
+      - Ref: SecurityGroup
+      BlockDeviceMappings:
+      - DeviceName: /dev/sda1
+        Ebs:
+          VolumeSize: 50
+      Tags:
+      - Key: CodeDeployTag
+        Value: CodeDeployDem
+      IamInstanceProfile:
+        Ref: InstanceRoleInstanceProfile
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - '#!/bin/bash -ex
+
+              '
+            - 'yum update -y aws-cfn-bootstrap
+
+              '
+            - 'yum install -y aws-cli
+
+              '
+            - 'yum install -y ruby
+
+              '
+            - 'iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 80 -j REDIRECT
+              --to-port 3000
+
+              '
+            - 'echo ''iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 80 -j REDIRECT
+              --to-port 3000'' >> /etc/rc.local
+
+              '
+            - '# Helper function.
+
+              '
+            - 'function error_exit
+
+              '
+            - '{
+
+              '
+            - '  /opt/aws/bin/cfn-signal -e 1 -r "$1" '''
+            - Ref: WaitHandle
+            - '''
+
+              '
+            - '  exit 1
+
+              '
+            - '}
+
+              '
+            - '# Install the AWS CodeDeploy Agent.
+
+              '
+            - 'cd /home/ec2-user/
+
+              '
+            - 'aws s3 cp ''s3://aws-codedeploy-us-east-1/latest/codedeploy-agent.noarch.rpm''
+              . || error_exit ''Failed to download AWS CodeDeploy Agent.''
+
+              '
+            - "yum -y install codedeploy-agent.noarch.rpm || error_exit 'Failed to\
+              \ install AWS CodeDeploy Agent.' \n"
+            - '/opt/aws/bin/cfn-init -s '
+            - Ref: AWS::StackId
+            - ' -r WebAppInstance --region '
+            - Ref: AWS::Region
+            - ' || error_exit ''Failed to run cfn-init.''
+
+              '
+            - '# All is well, so signal success.
+
+              '
+            - /opt/aws/bin/cfn-signal -e 0 -r "AWS CodeDeploy Agent setup complete."
+              '
+            - Ref: WaitHandle
+            - '''
+
+              '
+    Metadata:
+      AWS::CloudFormation::Init:
+        services:
+          sysvint:
+            codedeploy-agent:
+              enabled: true
+              ensureRunning: true
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+  WaitCondition:
+    DependsOn: WebAppInstance
+    Type: AWS::CloudFormation::WaitCondition
+    Properties:
+      Handle:
+        Ref: WaitHandle
+      Timeout: '900'
+  CodeDeployTrustRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Sid: '1'
+          Effect: Allow
+          Principal:
+            Service:
+            - codedeploy.us-east-1.amazonaws.com
+            - codedeploy.us-west-2.amazonaws.com
+            - codedeploy.eu-west-2.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+  CodeDeployRolePolicies:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CodeDeployPolicy
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Resource:
+          - '*'
+          Action:
+          - ec2:Describe*
+        - Effect: Allow
+          Resource:
+          - '*'
+          Action:
+          - autoscaling:CompleteLifecycleAction
+          - autoscaling:DeleteLifecycleHook
+          - autoscaling:DescribeLifecycleHooks
+          - autoscaling:DescribeAutoScalingGroups
+          - autoscaling:PutLifecycleHook
+          - autoscaling:RecordLifecycleActionHeartbeat
+      Roles:
+      - Ref: CodeDeployTrustRole
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: logs
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - ecr:GetAuthorizationToken
+            - ssm:GetParameters
+            Resource: '*'
+      - PolicyName: S3
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:GetObjectVersion
+            Resource:
+              Fn::Sub: arn:aws:s3:::${ArtifactBucket}/*
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: codepipeline.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Resource:
+            - Fn::Sub: arn:aws:s3:::${ArtifactBucket}/*
+            - Fn::Sub: arn:aws:s3:::${ArtifactBucket}
+            Effect: Allow
+            Action:
+            - s3:*
+          - Resource: '*'
+            Effect: Allow
+            Action:
+            - codebuild:StartBuild
+            - codebuild:BatchGetBuilds
+            - iam:PassRole
+          - Resource:
+            - Ref: CodeStarConnection
+            Effect: Allow
+            Action:
+            - codestar-connections:UseConnection
+          - Resource: '*'
+            Effect: Allow
+            Action:
+            - codedeploy:CreateDeployment
+            - codedeploy:CreateDeploymentGroup
+            - codedeploy:GetApplication
+            - codedeploy:GetApplicationRevision
+            - codedeploy:GetDeployment
+            - codedeploy:GetDeploymentConfig
+            - codedeploy:RegisterApplicationRevision
+  CodeStarConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: CfnExamplesGitHubConnection
+      ProviderType: GitHub
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName:
+        Fn::Sub: ${AWS::StackName}-artifacts-bucket
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn:
+        Fn::GetAtt:
+        - CodePipelineServiceRole
+        - Arn
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: ArtifactBucket
+      Stages:
+      - Name: Source
+        Actions:
+        - Name: App
+          ActionTypeId:
+            Category: Source
+            Owner: AWS
+            Version: '1'
+            Provider: CodeStarSourceConnection
+          Configuration:
+            ConnectionArn:
+              Ref: CodeStarConnection
+            BranchName: main
+            FullRepositoryId: Elvis-aws/Hello-Express
+          OutputArtifacts:
+          - Name: AppArtifact
+          RunOrder: 1
+      - Name: Build
+        Actions:
+        - Name: Build
+          ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: '1'
+            Provider: CodeBuild
+          Configuration:
+            ProjectName:
+              Ref: CodeBuildProject
+          InputArtifacts:
+          - Name: AppArtifact
+          OutputArtifacts:
+          - Name: BuildOutput
+          RunOrder: 1
+      - Name: Deploy
+        Actions:
+        - Name: Deploy
+          ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Version: '1'
+            Provider: CodeDeploy
+          Configuration:
+            ApplicationName:
+              Ref: CodeDeployApplication
+            DeploymentGroupName:
+              Ref: CodeDeployGroup
+          InputArtifacts:
+          - Name: BuildOutput
+          RunOrder: 1
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/docker:17.09.0
+        Type: LINUX_CONTAINER
+      Name:
+        Fn::Sub: ${AWS::StackName}-build
+      ServiceRole:
+        Ref: CodeBuildServiceRole
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName:
+        Fn::Sub: ${AWS::StackName}-hellow-express-app
+  CodeDeployGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName:
+        Ref: CodeDeployApplication
+      Ec2TagFilters:
+      - Key: CodeDeployTag
+        Value: CodeDeployDem
+        Type: KEY_AND_VALUE
+      ServiceRoleArn:
+        Fn::GetAtt:
+        - CodeDeployServiceRole
+        - Arn
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodeDeployServiceRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codedeploy.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: CodeDeployServiceRolePolicy
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:Describe*
+            - s3:Get*
+            - s3:List*
+            - s3:Put*
+            Resource: '*'
+Outputs:
+  PipelineUrl:
+    Value:
+      Fn::Sub: https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}

@@ -1,0 +1,12 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "codedeploy-ec2-app"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-jqczgsbbfu2s"
+s3_prefix = "codedeploy-ec2-app"
+region = "eu-west-2"
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+disable_rollback = true
+image_repositories = []

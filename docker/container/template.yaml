@@ -1,0 +1,169 @@
+Transform: AWS::Serverless-2016-10-31
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Docker-Hub, ECR, Lambda
+
+Parameters:
+  DockerHubPassword:
+    Type: String
+  DockerHubUsername:
+    Type: String
+
+Resources:
+##############################################
+########### SSM DockerHub Password ###########
+##############################################
+  SSMParameterDockerHubPassword:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub ${AWS::StackName}-dockerhubpassword
+      Type: String
+      Value: !Ref DockerHubPassword
+##############################################
+########### SSM DockerHub username ###########
+##############################################
+  SSMParameterDockerHubUsername:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub ${AWS::StackName}-dockerhubusername
+      Type: String
+      Value: !Ref DockerHubUsername
+##############################################
+################ ECR Repository ##############
+##############################################
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${AWS::StackName}-ecrrepository
+##############################################
+############### Custom Resource ##############
+##############################################
+  ECRLambdaCustomResource:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt ECRFunction.Arn
+##############################################
+############## ECR Lambda Function ###########
+##############################################
+  ECRFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-ecrfunction
+      CodeUri: app/
+      Handler: ecrfunction.lambda_handler
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt ECRFunctionRole.Arn
+      Environment:
+        Variables:
+          ACCOUNT_ID: !Ref AWS::AccountId
+          ECR_REPOSITORY_NAME: !Ref ECRRepository
+##############################################
+############## ECR Function Role #############
+##############################################
+  ECRFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-ecrdeleteimagespolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:BatchDeleteImage
+                  - ecr:ListImages
+                Resource:
+                  - !GetAtt ECRRepository.Arn
+##############################################
+############### Custom Resource ##############
+##############################################
+  S3LambdaCustomResource:
+    Type: Custom::CustomResource
+    Properties:
+      ServiceToken: !GetAtt S3Function.Arn
+##############################################
+############## S3 Lambda Function ############
+##############################################
+  S3Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-s3function
+      CodeUri: app/
+      Handler: s3function.lambda_handler
+      Runtime: python3.9
+      MemorySize: 128
+      Role: !GetAtt S3FunctionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref Bucket
+##############################################
+########## S3 Lambda Function Role ###########
+##############################################
+  S3FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-s3deleteobjectspolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt Bucket.Arn
+                  - !Sub
+                    - ${BucketArn}/*
+                    - BucketArn: !GetAtt Bucket.Arn
+##############################################
+################# S3 Bucket ##################
+##############################################
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AWS::StackName}-bucket
+      AccessControl: Private
+################### OUT PUT ##################
+##############################################
+Outputs:
+  SSMParameterDockerHubPassword:
+    Description: Docker hub password
+    Value: !Ref SSMParameterDockerHubPassword
+    Export:
+      Name: SSMParameterDockerHubPassword
+  SSMParameterDockerHubUsername:
+    Description: Docker hub username
+    Value: !Ref SSMParameterDockerHubUsername
+    Export:
+      Name: SSMParameterDockerHubUsername
+  ECRRepositoryName:
+    Description: ECR Repository name
+    Value: !Ref ECRRepository
+    Export:
+      Name: ECRRepositoryName
+  BucketName:
+    Description: S3 Bucket
+    Value: !Ref Bucket
+    Export:
+      Name: BucketName
